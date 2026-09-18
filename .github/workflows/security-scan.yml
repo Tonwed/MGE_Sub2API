@@ -2,9 +2,24 @@ name: Security Scan
 
 on:
   push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - 'README*.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
   schedule:
     - cron: '0 3 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
