@@ -281,6 +281,26 @@
                 <span :class="['h-1.5 w-1.5 rounded-full', getOpenAICompactMeta(row)?.dotClass]" />
                 <span>{{ getOpenAICompactMeta(row)?.label }}</span>
               </div>
+              <div v-if="isCodexStateEligible(row)" class="flex flex-wrap items-center gap-1.5">
+                <span
+                  v-if="row.extra?.codex_state_degraded === true"
+                  class="inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                  title="OpenAI 返回了 312 state"
+                >
+                  降智
+                </span>
+                <button
+                  type="button"
+                  class="inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors"
+                  :class="row.extra?.codex_state_auto_mint === true
+                    ? 'border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300'
+                    : 'border-gray-300 text-gray-500 dark:border-dark-600 dark:text-gray-400'"
+                  :disabled="togglingCodexState === row.id"
+                  @click.stop="handleToggleCodexStateAutoMint(row)"
+                >
+                  {{ row.extra?.codex_state_auto_mint === true ? '292自动已开' : '开启292自动' }}
+                </button>
+              </div>
             </div>
           </template>
           <template #cell-capacity="{ row }">
@@ -492,6 +512,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
+import { codexStateAPI } from '@/api/admin/codexState'
 import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
@@ -614,6 +635,7 @@ const showSchedulePanel = ref(false)
 const scheduleAcc = ref<Account | null>(null)
 const scheduleModelOptions = ref<SelectOption[]>([])
 const togglingSchedulable = ref<number | null>(null)
+const togglingCodexState = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, anchorRect:DOMRect|null}>({ show: false, acc: null, anchorRect: null })
 const exportingData = ref(false)
 const probingUpstreamBilling = reactive(new Set<number>())
@@ -1685,6 +1707,10 @@ function getOpenAIAuthMode(row: any): string | undefined {
   return typeof authMode === 'string' && authMode.trim() ? authMode : undefined
 }
 
+function isCodexStateEligible(row: any): boolean {
+  return row?.platform === 'openai' && row?.type === 'oauth'
+}
+
 // Antigravity 订阅等级辅助函数
 function getAntigravityTierFromRow(row: any): string | null {
   if (row.platform !== 'antigravity') return null
@@ -2461,6 +2487,21 @@ const handleToggleSchedulable = async (a: Account) => {
     appStore.showError(t('admin.accounts.failedToToggleSchedulable'))
   } finally {
     togglingSchedulable.value = null
+  }
+}
+const handleToggleCodexStateAutoMint = async (a: Account) => {
+  if (!isCodexStateEligible(a)) return
+  const nextEnabled = a.extra?.codex_state_auto_mint !== true
+  togglingCodexState.value = a.id
+  try {
+    await codexStateAPI.updateAccount(a.id, { auto_mint: nextEnabled })
+    const updated = await adminAPI.accounts.getById(a.id)
+    handleAccountUpdated(updated)
+  } catch (error) {
+    console.error('Failed to toggle Codex state auto mint:', error)
+    appStore.showError(extractApiErrorMessage(error, '切换 292 自动获取失败'))
+  } finally {
+    togglingCodexState.value = null
   }
 }
 const handleShowTempUnsched = (a: Account) => { tempUnschedAcc.value = a; showTempUnsched.value = true }

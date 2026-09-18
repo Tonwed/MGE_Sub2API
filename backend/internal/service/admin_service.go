@@ -531,6 +531,7 @@ type CreateProxyInput struct {
 	ExpiresAt      *time.Time
 	FallbackMode   string
 	BackupProxyID  *int64
+	ChainProxyID   *int64
 	ExpiryWarnDays int
 }
 
@@ -549,6 +550,8 @@ type UpdateProxyInput struct {
 	FallbackMode   string
 	BackupProxyID  *int64
 	ClearBackupID  bool
+	ChainProxyID   *int64
+	ClearChainID   bool
 	ExpiryWarnDays *int
 }
 

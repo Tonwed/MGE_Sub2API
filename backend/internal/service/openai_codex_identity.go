@@ -38,7 +38,12 @@ func buildCodexCLIUserAgent(version string) string {
 	if version = NormalizeCodexClientVersion(version); version == "" {
 		return codexCLIUserAgent
 	}
-	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix
+	return formatCodexCLIUserAgent(version)
+}
+
+func formatCodexCLIUserAgent(version string) string {
+	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix +
+		" (" + openai.CodexDefaultOriginator + "; " + version + ")"
 }
 
 // codexIdentityEnforcement 控制 enforceCodexIdentityHeaders 是否强制统一出站身份，
@@ -158,6 +163,7 @@ func resolveCodexOutboundIdentity(candidateUA string) codexOutboundIdentity {
 	if rebuilt := openai.SetCodexUserAgentVersion(pairedUA, version); rebuilt != "" {
 		pairedUA = rebuilt
 	}
+	pairedUA = openai.SetCodexUserAgentTrailer(pairedUA, originator, version)
 	return codexOutboundIdentity{userAgent: pairedUA, originator: originator, version: version}
 }
 

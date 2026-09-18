@@ -7,11 +7,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -81,13 +83,7 @@ type proxyProbeService struct {
 }
 
 func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*service.ProxyExitInfo, int64, error) {
-	client, err := httpclient.GetClient(httpclient.Options{
-		ProxyURL:           proxyURL,
-		Timeout:            defaultProxyProbeTimeout,
-		InsecureSkipVerify: s.insecureSkipVerify,
-		ValidateResolvedIP: s.validateResolvedIP,
-		AllowPrivateHosts:  s.allowPrivateHosts,
-	})
+	client, err := s.probeClient(proxyURL)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create proxy client: %w", err)
 	}
@@ -113,6 +109,50 @@ func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*s
 	}
 
 	return nil, 0, fmt.Errorf("all probe URLs failed, last error: %w", lastErr)
+}
+
+func (s *proxyProbeService) probeClient(proxyURL string) (*http.Client, error) {
+	cleanProxyURL, serviceHops, err := service.ParseProxyChainURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(serviceHops) == 0 {
+		return httpclient.GetClient(httpclient.Options{
+			ProxyURL:           proxyURL,
+			Timeout:            defaultProxyProbeTimeout,
+			InsecureSkipVerify: s.insecureSkipVerify,
+			ValidateResolvedIP: s.validateResolvedIP,
+			AllowPrivateHosts:  s.allowPrivateHosts,
+		})
+	}
+	parsed, err := url.Parse(cleanProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	hops := make([]proxyutil.ChainHop, 0, len(serviceHops))
+	for _, item := range serviceHops {
+		hops = append(hops, proxyutil.ChainHop{
+			Protocol: item.Protocol,
+			Host:     item.Host,
+			Port:     item.Port,
+			Username: item.Username,
+			Password: item.Password,
+		})
+	}
+	forward, err := proxyutil.NewChainDialer(hops)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := buildUpstreamTransportWithForward(
+		defaultPoolSettings(nil),
+		parsed,
+		forward,
+		upstreamProtocolModeDefault,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Transport: transport, Timeout: defaultProxyProbeTimeout}, nil
 }
 
 func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Client, url string, parser string) (*service.ProxyExitInfo, int64, error) {

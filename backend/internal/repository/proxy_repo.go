@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 
 	entsql "entgo.io/ent/dialect/sql"
 )
@@ -57,6 +58,11 @@ func (r *proxyRepository) Create(ctx context.Context, proxyIn *service.Proxy) er
 
 	created, err := builder.Save(ctx)
 	if err == nil {
+		if proxyIn.ChainProxyID != nil {
+			if _, err = r.client.ExecContext(ctx, `UPDATE proxies SET chain_proxy_id = $1 WHERE id = $2`, *proxyIn.ChainProxyID, created.ID); err != nil {
+				return err
+			}
+		}
 		applyProxyEntityToService(proxyIn, created)
 	}
 	return err
@@ -70,7 +76,11 @@ func (r *proxyRepository) GetByID(ctx context.Context, id int64) (*service.Proxy
 		}
 		return nil, err
 	}
-	return proxyEntityToService(m), nil
+	out := proxyEntityToService(m)
+	if err := hydrateProxyChains(ctx, r.client, []*service.Proxy{out}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *proxyRepository) ListByIDs(ctx context.Context, ids []int64) ([]service.Proxy, error) {
@@ -88,6 +98,9 @@ func (r *proxyRepository) ListByIDs(ctx context.Context, ids []int64) ([]service
 	out := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
 		out = append(out, *proxyEntityToService(proxies[i]))
+	}
+	if err := hydrateProxyChains(ctx, r.client, ptrProxySlice(out)); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -114,6 +127,12 @@ func (r *proxyRepository) Update(ctx context.Context, proxyIn *service.Proxy) er
 	if err != nil {
 		return err
 	}
+	if proxyIn.ChainProxyChanged {
+		if _, err := client.ExecContext(ctx, `UPDATE proxies SET chain_proxy_id = $1 WHERE id = $2`, proxyIn.ChainProxyID, proxyIn.ID); err != nil {
+			return err
+		}
+	}
+	proxyIn.ChainProxy = nil
 	if tx != nil {
 		if err := tx.Commit(); err != nil {
 			return err
@@ -316,6 +335,9 @@ func (r *proxyRepository) ListWithFilters(ctx context.Context, params pagination
 	for i := range proxies {
 		outProxies = append(outProxies, *proxyEntityToService(proxies[i]))
 	}
+	if err := hydrateProxyChains(ctx, r.client, ptrProxySlice(outProxies)); err != nil {
+		return nil, nil, err
+	}
 
 	return outProxies, paginationResultFromTotal(int64(total), params), nil
 }
@@ -401,6 +423,11 @@ func (r *proxyRepository) buildProxyWithAccountCountResult(ctx context.Context, 
 			AccountCount: counts[proxyOut.ID],
 		})
 	}
+	for i := range result {
+		if err := hydrateProxyChains(ctx, r.client, []*service.Proxy{&result[i].Proxy}); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	return result, paginationResultFromTotal(total, params), nil
 }
@@ -445,6 +472,9 @@ func (r *proxyRepository) ListActive(ctx context.Context) ([]service.Proxy, erro
 	outProxies := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
 		outProxies = append(outProxies, *proxyEntityToService(proxies[i]))
+	}
+	if err := hydrateProxyChains(ctx, r.client, ptrProxySlice(outProxies)); err != nil {
+		return nil, err
 	}
 	return outProxies, nil
 }
@@ -575,6 +605,11 @@ func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]ser
 			AccountCount: counts[proxyOut.ID],
 		})
 	}
+	for i := range result {
+		if err := hydrateProxyChains(ctx, r.client, []*service.Proxy{&result[i].Proxy}); err != nil {
+			return nil, err
+		}
+	}
 
 	return result, nil
 }
@@ -595,6 +630,7 @@ func proxyEntityToService(m *dbent.Proxy) *service.Proxy {
 		ExpiresAt:      m.ExpiresAt,
 		FallbackMode:   m.FallbackMode,
 		BackupProxyID:  m.BackupProxyID,
+		ChainProxyID:   nil,
 		ExpiryWarnDays: m.ExpiryWarnDays,
 	}
 	if m.Username != nil {
@@ -604,6 +640,132 @@ func proxyEntityToService(m *dbent.Proxy) *service.Proxy {
 		out.Password = *m.Password
 	}
 	return out
+}
+
+func ptrProxySlice(values []service.Proxy) []*service.Proxy {
+	out := make([]*service.Proxy, 0, len(values))
+	for i := range values {
+		out = append(out, &values[i])
+	}
+	return out
+}
+
+func hydrateProxyChains(ctx context.Context, client *dbent.Client, roots []*service.Proxy) error {
+	if client == nil || len(roots) == 0 {
+		return nil
+	}
+	nodes := make(map[int64]*service.Proxy, len(roots))
+	pending := make([]int64, 0, len(roots))
+	rootIDs := make([]int64, 0, len(roots))
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		nodes[root.ID] = root
+		rootIDs = append(rootIDs, root.ID)
+		if root.ChainProxyID != nil && *root.ChainProxyID > 0 {
+			pending = append(pending, *root.ChainProxyID)
+		}
+	}
+	rootChainIDs, err := loadProxyChainIDs(ctx, client, rootIDs)
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		if chainID, ok := rootChainIDs[root.ID]; ok {
+			id := chainID
+			root.ChainProxyID = &id
+			pending = append(pending, chainID)
+		} else {
+			root.ChainProxyID = nil
+		}
+	}
+	for depth := 0; len(pending) > 0 && depth < 32; depth++ {
+		pending = uniquePositiveInt64s(pending)
+		missing := make([]int64, 0, len(pending))
+		for _, id := range pending {
+			if _, ok := nodes[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) == 0 {
+			break
+		}
+		ents, err := client.Proxy.Query().Where(proxy.IDIn(missing...)).All(ctx)
+		if err != nil {
+			return err
+		}
+		chainIDs, err := loadProxyChainIDs(ctx, client, missing)
+		if err != nil {
+			return err
+		}
+		next := make([]int64, 0, len(ents))
+		for _, ent := range ents {
+			node := proxyEntityToService(ent)
+			if id, ok := chainIDs[ent.ID]; ok {
+				node.ChainProxyID = &id
+				next = append(next, id)
+			}
+			nodes[ent.ID] = node
+		}
+		pending = next
+	}
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		root.ChainProxy = resolveProxyChain(root.ChainProxyID, nodes, make(map[int64]struct{}))
+	}
+	return nil
+}
+
+func loadProxyChainIDs(ctx context.Context, client *dbent.Client, ids []int64) (map[int64]int64, error) {
+	out := make(map[int64]int64)
+	if client == nil || len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := client.QueryContext(
+		ctx,
+		`SELECT id, chain_proxy_id FROM proxies WHERE id = ANY($1) AND deleted_at IS NULL AND chain_proxy_id IS NOT NULL`,
+		pq.Array(ids),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		var chainID sql.NullInt64
+		if err := rows.Scan(&id, &chainID); err != nil {
+			return nil, err
+		}
+		if chainID.Valid && chainID.Int64 > 0 {
+			out[id] = chainID.Int64
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func resolveProxyChain(id *int64, nodes map[int64]*service.Proxy, seen map[int64]struct{}) *service.Proxy {
+	if id == nil || *id <= 0 {
+		return nil
+	}
+	if _, ok := seen[*id]; ok {
+		return nil
+	}
+	node, ok := nodes[*id]
+	if !ok {
+		return nil
+	}
+	seen[*id] = struct{}{}
+	node.ChainProxy = resolveProxyChain(node.ChainProxyID, nodes, seen)
+	return node
 }
 
 func applyProxyEntityToService(dst *service.Proxy, src *dbent.Proxy) {
@@ -624,6 +786,9 @@ func (r *proxyRepository) ListAllForFallback(ctx context.Context) ([]service.Pro
 	out := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
 		out = append(out, *proxyEntityToService(proxies[i]))
+	}
+	if err := hydrateProxyChains(ctx, r.client, ptrProxySlice(out)); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

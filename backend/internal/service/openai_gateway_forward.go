@@ -1443,9 +1443,18 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 客户端回带的 x-codex-turn-state 若已知由其他账号铸造（failover 换号），
 	// 剥离后再出站——异账号 blob 与本账号的（指纹收敛后）出站身份自相矛盾。
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
+	s.injectCodexTurnState(
+		ctx,
+		c,
+		account,
+		strings.TrimSpace(gjson.GetBytes(body, "model").String()),
+		req.Header,
+	)
 	if account.UsesOpenAICodexProtocol() {
 		compatMessagesBridge := isOpenAICompatMessagesBridgeContext(c) || isOpenAICompatMessagesBridgeBody(body)
 		// 清除客户端透传的 session 头，后续用隔离后的值重新设置，防止跨用户会话碰撞。
+		clientSessionID := strings.TrimSpace(req.Header.Get("session_id"))
+		clientSessionDashID := strings.TrimSpace(req.Header.Get("session-id"))
 		clientConversationID := strings.TrimSpace(req.Header.Get("conversation_id"))
 		req.Header.Del("conversation_id")
 		req.Header.Del("session_id")
@@ -1462,17 +1471,31 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			if req.Header.Get("version") == "" {
 				req.Header.Set("version", CodexCanonicalClientVersion())
 			}
-			compactSession := resolveOpenAICompactSessionID(c)
-			req.Header.Set("session_id", isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), compactSession))
+			if clientSessionID == "" {
+				clientSessionID = resolveOpenAICompactSessionID(c)
+			}
 		} else {
 			req.Header.Set("accept", "text/event-stream")
 		}
-		if promptCacheKey != "" {
-			isolated := isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey)
-			req.Header.Set("session_id", isolated)
-			if !compatMessagesBridge || clientConversationID != "" {
-				req.Header.Set("conversation_id", isolated)
-			}
+		req.Header.Set("accept-encoding", openAICodexAcceptEncoding)
+		sessionSeed := strings.TrimSpace(promptCacheKey)
+		if sessionSeed == "" {
+			sessionSeed = clientSessionID
+		}
+		if sessionSeed == "" {
+			sessionSeed = clientSessionDashID
+		}
+		if sessionSeed != "" {
+			scoped := scopeOpenAICodexSessionValue(codexAccountIdentitySource(c, account), apiKeyID, sessionSeed)
+			req.Header.Set("session_id", scoped)
+			req.Header.Set("session-id", scoped)
+		}
+		conversationSeed := clientConversationID
+		if conversationSeed == "" {
+			conversationSeed = sessionSeed
+		}
+		if conversationSeed != "" && (!compatMessagesBridge || clientConversationID != "") {
+			req.Header.Set("conversation_id", scopeOpenAICodexSessionValue(codexAccountIdentitySource(c, account), apiKeyID, conversationSeed))
 		}
 	} else if isOpenAIResponsesCompactPath(c) {
 		// compact 上游是 unary JSON 协议：API-key 账号也显式声明 Accept，

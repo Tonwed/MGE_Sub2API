@@ -315,6 +315,29 @@ func SetCodexUserAgentVersion(userAgent, version string) string {
 	return rewriteCodexUATrailerVersion(client+"/"+version+tail, version)
 }
 
+// SetCodexUserAgentTrailer appends or updates the codex-rs clientInfo trailer
+// ` ({name}; {version})`. Unlike rewriteCodexUATrailerVersion, it also adds the
+// trailer when a configured UA only contains the OS/terminal suffix.
+func SetCodexUserAgentTrailer(userAgent, name, version string) string {
+	ua := strings.TrimSpace(userAgent)
+	name = strings.TrimSpace(name)
+	version = strings.TrimSpace(version)
+	if ua == "" || name == "" || version == "" || !IsCodexOfficialClientOriginator(name) {
+		return ua
+	}
+
+	if open := strings.LastIndex(ua, "("); open >= 0 {
+		if closeOffset := strings.Index(ua[open+1:], ")"); closeOffset >= 0 {
+			inner := ua[open+1 : open+1+closeOffset]
+			parts := strings.SplitN(inner, ";", 2)
+			if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[0]), name) {
+				return ua[:open+1] + name + "; " + version + ua[open+1+closeOffset:]
+			}
+		}
+	}
+	return ua + " (" + name + "; " + version + ")"
+}
+
 // rewriteCodexUATrailerVersion 把尾部官方客户端标识组 `(name; version)` 的版本改成 version。
 // 括号组缺少 `;` 分隔的版本、或 name 不是官方 originator 时原样返回。
 func rewriteCodexUATrailerVersion(ua, version string) string {

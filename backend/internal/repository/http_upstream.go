@@ -6,7 +6,9 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -503,9 +505,16 @@ func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID in
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
 func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
 	isolation := s.getIsolationMode()
-	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
+	cleanProxyURL, chainKey, chainDialer, err := prepareProxyChain(proxyURL)
 	if err != nil {
 		return nil, err
+	}
+	proxyKey, parsedProxy, err := normalizeProxyURL(cleanProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if chainKey != "" {
+		proxyKey += "|chain:" + chainKey
 	}
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
@@ -562,7 +571,13 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 
 	// 创建带 TLS 指纹的 Transport
 	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "cache_key", cacheKey, "proxy", proxyKey)
-	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	var transport *http.Transport
+	if chainDialer != nil {
+		slog.Debug("tls_fingerprint_bypassed_for_proxy_chain", "account_id", accountID, "proxy", proxyKey)
+		transport, err = buildUpstreamTransportWithForward(settings, parsedProxy, chainDialer, upstreamProtocolModeDefault)
+	} else {
+		transport, err = buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	}
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build TLS fingerprint transport: %w", err)
@@ -664,9 +679,16 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	// 获取隔离模式
 	isolation := s.getIsolationMode()
 	// 标准化代理 URL 并解析
-	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
+	cleanProxyURL, chainKey, chainDialer, err := prepareProxyChain(proxyURL)
 	if err != nil {
 		return nil, err
+	}
+	proxyKey, parsedProxy, err := normalizeProxyURL(cleanProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if chainKey != "" {
+		proxyKey += "|chain:" + chainKey
 	}
 	// 根据请求 profile（例如 OpenAI）选择协议模式
 	protocolMode := s.resolveProtocolMode(profile, proxyKey, parsedProxy)
@@ -718,7 +740,7 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	}
 
 	// 缓存未命中或需要重建，创建新客户端
-	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode)
+	transport, err := buildUpstreamTransportWithForward(settings, parsedProxy, chainDialer, protocolMode)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build transport: %w", err)
@@ -1253,6 +1275,32 @@ func normalizeProxyURL(raw string) (string, *url.URL, error) {
 	return parsed.String(), parsed, nil
 }
 
+func prepareProxyChain(raw string) (string, string, *proxyutil.ForwardDialer, error) {
+	clean, serviceHops, err := service.ParseProxyChainURL(raw)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if len(serviceHops) == 0 {
+		return clean, "", nil, nil
+	}
+	hops := make([]proxyutil.ChainHop, 0, len(serviceHops))
+	for _, hop := range serviceHops {
+		hops = append(hops, proxyutil.ChainHop{
+			Protocol: hop.Protocol,
+			Host:     hop.Host,
+			Port:     hop.Port,
+			Username: hop.Username,
+			Password: hop.Password,
+		})
+	}
+	dialer, err := proxyutil.NewChainDialer(hops)
+	if err != nil {
+		return "", "", nil, err
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return clean, hex.EncodeToString(sum[:8]), dialer, nil
+}
+
 // defaultPoolSettings 获取默认连接池配置
 // 从全局配置中读取，无效值使用常量默认值
 //
@@ -1326,6 +1374,10 @@ func newUpstreamDialer() *net.Dialer {
 //   - IdleConnTimeout: 空闲连接超时（超时后关闭）
 //   - ResponseHeaderTimeout: 等待响应头超时（不影响流式传输）
 func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMode string) (*http.Transport, error) {
+	return buildUpstreamTransportWithForward(settings, proxyURL, nil, protocolMode)
+}
+
+func buildUpstreamTransportWithForward(settings poolSettings, proxyURL *url.URL, forward *proxyutil.ForwardDialer, protocolMode string) (*http.Transport, error) {
 	transport := &http.Transport{
 		DialContext:           newUpstreamDialer().DialContext,
 		TLSHandshakeTimeout:   defaultUpstreamTLSHandshakeTimeout,
@@ -1351,7 +1403,7 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		transport.ForceAttemptHTTP2 = false
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}
-	if err := proxyutil.ConfigureTransportProxy(transport, proxyURL); err != nil {
+	if err := proxyutil.ConfigureTransportProxyWithForward(transport, proxyURL, forward); err != nil {
 		return nil, err
 	}
 	return transport, nil

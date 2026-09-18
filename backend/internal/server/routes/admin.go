@@ -67,6 +67,9 @@ func RegisterAdminRoutes(
 		// 代理管理
 		registerProxyRoutes(admin, h, stepUpAuth)
 
+		// 防降智（Codex turn state 管理）
+		registerCodexStateRoutes(admin, h)
+
 		// 卡密管理
 		registerRedeemCodeRoutes(admin, h)
 
@@ -523,6 +526,15 @@ func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth
 		proxies.GET("/:id/accounts", h.Admin.Proxy.GetProxyAccounts)
 		proxies.POST("/batch-delete", h.Admin.Proxy.BatchDelete)
 		proxies.POST("/batch", h.Admin.Proxy.BatchCreate)
+	}
+}
+
+func registerCodexStateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	codexState := admin.Group("/codex-state")
+	{
+		codexState.GET("/overview", h.Admin.CodexState.Overview)
+		codexState.PUT("/accounts/:id", h.Admin.CodexState.UpdateAccount)
+		codexState.POST("/accounts/:id/mint", h.Admin.CodexState.TriggerMint)
 	}
 }
 

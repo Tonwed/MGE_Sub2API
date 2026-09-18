@@ -161,6 +161,9 @@
                 </div>
               </div>
             </div>
+            <div v-if="row.chain_proxy_id" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              经 {{ proxyDisplayName(row.chain_proxy_id) }}
+            </div>
           </template>
 
           <template #cell-auth="{ row }">
@@ -428,6 +431,23 @@
         class="space-y-5"
       >
         <div>
+          <label class="input-label">自动识别</label>
+          <div class="flex gap-2">
+            <input
+              v-model="quickProxyInput"
+              type="text"
+              class="input font-mono text-sm"
+              placeholder="us.cliproxy.io:443:用户名:密码"
+              @keydown.enter.prevent="applyQuickProxyInput"
+              @paste="handleQuickProxyPaste"
+            />
+            <button type="button" class="btn btn-secondary shrink-0" @click="applyQuickProxyInput">
+              识别
+            </button>
+          </div>
+          <p class="input-hint mt-1">支持 URL 和 host:port:username:password，443 端口默认识别为 HTTPS。</p>
+        </div>
+        <div>
           <label class="input-label">{{ t('admin.proxies.name') }}</label>
           <input
             v-model="createForm.name"
@@ -526,6 +546,11 @@
         <div v-if="createForm.fallback_mode === 'proxy'">
           <label class="input-label">{{ t('admin.proxies.backupProxy') }}</label>
           <Select v-model="createForm.backup_proxy_id" :options="backupProxyOptions()" />
+        </div>
+        <div>
+          <label class="input-label">链式前置代理</label>
+          <Select v-model="createForm.chain_proxy_id" :options="chainProxyOptions()" />
+          <p class="input-hint mt-1">当前代理会先经过这个前置代理，再访问目标。留空表示直连前置。</p>
         </div>
 
       </form>
@@ -759,6 +784,10 @@
         <div v-if="editForm.fallback_mode === 'proxy'">
           <label class="input-label">{{ t('admin.proxies.backupProxy') }}</label>
           <Select v-model="editForm.backup_proxy_id" :options="backupProxyOptions(editingProxy?.id)" />
+        </div>
+        <div>
+          <label class="input-label">链式前置代理</label>
+          <Select v-model="editForm.chain_proxy_id" :options="chainProxyOptions(editingProxy?.id)" />
         </div>
 
       </form>
@@ -1107,6 +1136,7 @@ const qualityReport = ref<ProxyQualityCheckResult | null>(null)
 // Batch import state
 const createMode = ref<'standard' | 'batch'>('standard')
 const batchInput = ref('')
+const quickProxyInput = ref('')
 const batchParseResult = reactive({
   total: 0,
   valid: 0,
@@ -1131,6 +1161,7 @@ const createForm = reactive({
   expires_at: '' as string,
   fallback_mode: 'none' as 'none' | 'proxy' | 'direct',
   backup_proxy_id: null as number | null,
+  chain_proxy_id: null as number | null,
   expiry_warn_days: 7 as number,
 })
 
@@ -1145,6 +1176,7 @@ const editForm = reactive({
   expires_at: '' as string,
   fallback_mode: 'none' as 'none' | 'proxy' | 'direct',
   backup_proxy_id: null as number | null,
+  chain_proxy_id: null as number | null,
   expiry_warn_days: 7 as number,
 })
 
@@ -1156,6 +1188,15 @@ const backupProxyOptions = (excludeId?: number) =>
   allProxiesForBackup.value
     .filter(p => p.id !== excludeId)
     .map(p => ({ label: `${p.name} (${p.host}:${p.port})`, value: p.id }))
+const chainProxyOptions = (excludeId?: number) =>
+  allProxiesForBackup.value
+    .filter(p => p.id !== excludeId)
+    .map(p => ({ label: `${p.name} (${p.host}:${p.port})`, value: p.id }))
+const proxyDisplayName = (id?: number | null) => {
+  if (!id) return '-'
+  const proxy = allProxiesForBackup.value.find(p => p.id === id)
+  return proxy ? `${proxy.name} (${proxy.host}:${proxy.port})` : `#${id}`
+}
 
 let abortController: AbortController | null = null
 
@@ -1265,7 +1306,9 @@ const closeCreateModal = () => {
   createForm.expires_at = ''
   createForm.fallback_mode = 'none'
   createForm.backup_proxy_id = null
+  createForm.chain_proxy_id = null
   createForm.expiry_warn_days = 7
+  quickProxyInput.value = ''
   createPasswordVisible.value = false
   batchInput.value = ''
   batchParseResult.total = 0
@@ -1297,13 +1340,25 @@ const parseProxyUrl = (
   // Regex to parse proxy URL (supports http, https, socks5, socks5h).
   // Host alternatives: [bracketed-IPv6] | hostname/IPv4 (colon-free, so the
   // match stops before the final :port).
-  const regex =
-    /^(https?|socks5h?):\/\/(?:([^:@\[\]]+):([^@\[\]]+)@)?(\[[0-9a-f:.]+\]|[^:\[\]]+):(\d+)$/i
-  const match = trimmed.match(regex)
-
-  if (!match) return null
-
-  const [, protocol, username, password, rawHost, port] = match
+  let protocol = ''
+  let username = ''
+  let password = ''
+  let rawHost = ''
+  let port = ''
+  if (trimmed.includes('://')) {
+    const regex =
+      /^(https?|socks5h?):\/\/(?:([^:@\[\]]+):([^@\[\]]+)@)?(\[[0-9a-f:.]+\]|[^:\[\]]+):(\d+)$/i
+    const match = trimmed.match(regex)
+    if (!match) return null
+    ;[, protocol, username, password, rawHost, port] = match
+  } else {
+    const parts = trimmed.split(':')
+    if (parts.length !== 4) return null
+    ;[rawHost, port, username, password] = parts
+    // Cliproxy 等服务会在 443 端口提供明文 HTTP CONNECT。
+    // 未显式声明 https:// 时统一按 HTTP 代理处理，用户仍可在协议下拉框中手动改为 HTTPS。
+    protocol = 'http'
+  }
   const portNum = parseInt(port, 10)
 
   if (portNum < 1 || portNum > 65535) return null
@@ -1318,6 +1373,26 @@ const parseProxyUrl = (
     username: username?.trim() || '',
     password: password?.trim() || ''
   }
+}
+
+const applyQuickProxyInput = () => {
+  const parsed = parseProxyUrl(quickProxyInput.value)
+  if (!parsed) {
+    appStore.showError('无法识别代理，请使用 host:port:用户名:密码 或完整代理 URL')
+    return
+  }
+  createForm.protocol = parsed.protocol
+  createForm.host = parsed.host
+  createForm.port = parsed.port
+  createForm.username = parsed.username
+  createForm.password = parsed.password
+  if (!createForm.name.trim()) {
+    createForm.name = `${parsed.host}:${parsed.port}`
+  }
+}
+
+const handleQuickProxyPaste = () => {
+  setTimeout(applyQuickProxyInput, 0)
 }
 
 const parseBatchInput = () => {
@@ -1401,6 +1476,7 @@ const handleCreateProxy = async () => {
       expires_at: createForm.expires_at ? Math.floor(new Date(createForm.expires_at).getTime() / 1000) : null,
       fallback_mode: createForm.fallback_mode,
       backup_proxy_id: createForm.fallback_mode === 'proxy' ? createForm.backup_proxy_id : null,
+      chain_proxy_id: createForm.chain_proxy_id,
       expiry_warn_days: createForm.expiry_warn_days,
     })
     appStore.showSuccess(t('admin.proxies.proxyCreated'))
@@ -1426,6 +1502,7 @@ const handleEdit = (proxy: Proxy) => {
   editForm.expires_at = proxy.expires_at ? proxy.expires_at.slice(0, 10) : ''
   editForm.fallback_mode = proxy.fallback_mode || 'none'
   editForm.backup_proxy_id = proxy.backup_proxy_id ?? null
+  editForm.chain_proxy_id = proxy.chain_proxy_id ?? null
   editForm.expiry_warn_days = proxy.expiry_warn_days ?? 7
   editPasswordVisible.value = false
   editPasswordDirty.value = false
@@ -1466,6 +1543,7 @@ const handleUpdateProxy = async () => {
       expires_at: editForm.expires_at ? Math.floor(new Date(editForm.expires_at).getTime() / 1000) : null,
       fallback_mode: editForm.fallback_mode,
       backup_proxy_id: editForm.fallback_mode === 'proxy' ? editForm.backup_proxy_id : null,
+      chain_proxy_id: editForm.chain_proxy_id,
       expiry_warn_days: editForm.expiry_warn_days,
     }
 

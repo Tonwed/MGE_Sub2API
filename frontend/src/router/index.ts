@@ -526,6 +526,17 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/anti-degrade',
+    name: 'AdminAntiDegrade',
+    component: () => import('@/views/admin/AntiDegradeView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: '防降智',
+      titleKey: 'nav.antiDegrade'
+    }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),

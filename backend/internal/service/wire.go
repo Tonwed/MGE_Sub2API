@@ -180,13 +180,24 @@ func ProvideOpenAITokenProvider(
 func ProvideOpenAIQuotaService(
 	accountRepo AccountRepository,
 	proxyRepo ProxyRepository,
+	httpUpstream HTTPUpstream,
+	cache GatewayCache,
 	tokenProvider *OpenAITokenProvider,
 	privacyClientFactory PrivacyClientFactory,
 	openAIGatewayService *OpenAIGatewayService,
-) *OpenAIQuotaService {
+) (*OpenAIQuotaService, *CodexStateManager) {
+	var codexStateManager *CodexStateManager
+	if openAIGatewayService != nil {
+		var stateCache CodexStateCache
+		if typed, ok := cache.(CodexStateCache); ok {
+			stateCache = typed
+		}
+		codexStateManager = NewCodexStateManager(accountRepo, proxyRepo, httpUpstream, stateCache)
+		openAIGatewayService.SetCodexStateManager(codexStateManager)
+	}
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
 	service.agentIdentityWS = openAIGatewayService
-	return service
+	return service, codexStateManager
 }
 
 // ProvideOpenAIQuotaAutoResetService 启动账号级自动用卡队列与补偿扫描。
@@ -844,6 +855,7 @@ var ProviderSet = wire.NewSet(
 	NewAdminService,
 	NewGatewayService,
 	NewOpenAIGatewayService,
+	NewCodexStateAdminService,
 	ProvideImageStorageSettingService,
 	ProvideImageTaskService,
 	ProvideBatchImageModelPricingResolver,

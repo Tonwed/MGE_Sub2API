@@ -108,6 +108,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 			"x-codex-installation-id",
 			"session-id",
 			"thread-id",
+			"x-codex-parent-thread-id",
 			"x-client-request-id",
 		} {
 			if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
@@ -125,10 +126,12 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		apiKeyID := getAPIKeyIDFromContext(c)
 		if sessionResolution.SessionID != "" {
-			headers.Set("session_id", isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), sessionResolution.SessionID))
+			scoped := scopeOpenAICodexSessionValue(codexAccountIdentitySource(c, account), apiKeyID, sessionResolution.SessionID)
+			headers.Set("session_id", scoped)
+			headers.Set("session-id", scoped)
 		}
 		if sessionResolution.ConversationID != "" {
-			headers.Set("conversation_id", isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), sessionResolution.ConversationID))
+			headers.Set("conversation_id", scopeOpenAICodexSessionValue(codexAccountIdentitySource(c, account), apiKeyID, sessionResolution.ConversationID))
 		}
 	} else {
 		if sessionResolution.SessionID != "" {
@@ -143,6 +146,9 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	}
 	if metadata := strings.TrimSpace(turnMetadata); metadata != "" {
 		headers.Set(openAIWSTurnMetadataHeader, metadata)
+	}
+	if s != nil && s.codexStateManager != nil {
+		s.codexStateManager.InjectHeader(ctx, account, routingModel, headers)
 	}
 	applyCodexAccountIdentityHeaders(headers, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	applyStagedCodexFingerprintHeaders(c, account, headers)

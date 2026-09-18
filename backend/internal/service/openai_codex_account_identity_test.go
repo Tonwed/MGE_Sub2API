@@ -114,7 +114,8 @@ func TestCodexAccountIdentitySourceResolvesShadowAndOverwritesFailoverContext(t 
 		"token", true, "client-session", true,
 	)
 	require.NoError(t, err)
-	require.Equal(t, isolateOpenAIUpstreamSessionID(0, parent, "client-session"), req.Header.Get("session_id"))
+	require.Equal(t, scopeOpenAICodexSessionValue(parent, 0, "client-session"), req.Header.Get("session_id"))
+	require.Equal(t, req.Header.Get("session_id"), req.Header.Get("session-id"))
 
 	next := &Account{ID: 19, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{
 		"chatgpt_account_id": "other-account",

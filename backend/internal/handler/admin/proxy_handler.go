@@ -36,6 +36,7 @@ type CreateProxyRequest struct {
 	ExpiresAt      *int64 `json:"expires_at"`
 	FallbackMode   string `json:"fallback_mode" binding:"omitempty,oneof=none proxy direct"`
 	BackupProxyID  *int64 `json:"backup_proxy_id"`
+	ChainProxyID   *int64 `json:"chain_proxy_id"`
 	ExpiryWarnDays int    `json:"expiry_warn_days" binding:"omitempty,min=0"`
 }
 
@@ -51,6 +52,7 @@ type UpdateProxyRequest struct {
 	ExpiresAt      dto.NullableInt64Field `json:"expires_at"`
 	FallbackMode   string                 `json:"fallback_mode" binding:"omitempty,oneof=none proxy direct"`
 	BackupProxyID  dto.NullableInt64Field `json:"backup_proxy_id"`
+	ChainProxyID   dto.NullableInt64Field `json:"chain_proxy_id"`
 	ExpiryWarnDays *int                   `json:"expiry_warn_days" binding:"omitempty,min=0"`
 }
 
@@ -158,6 +160,7 @@ func (h *ProxyHandler) Create(c *gin.Context) {
 			ExpiresAt:      expiresAt,
 			FallbackMode:   strings.TrimSpace(req.FallbackMode),
 			BackupProxyID:  req.BackupProxyID,
+			ChainProxyID:   req.ChainProxyID,
 			ExpiryWarnDays: req.ExpiryWarnDays,
 		})
 		if err != nil {
@@ -206,6 +209,8 @@ func (h *ProxyHandler) Update(c *gin.Context) {
 		FallbackMode:   strings.TrimSpace(req.FallbackMode),
 		BackupProxyID:  req.BackupProxyID.Value,
 		ClearBackupID:  req.BackupProxyID.Set && req.BackupProxyID.Value == nil,
+		ChainProxyID:   req.ChainProxyID.Value,
+		ClearChainID:   req.ChainProxyID.Set && req.ChainProxyID.Value == nil,
 		ExpiryWarnDays: req.ExpiryWarnDays,
 	})
 	if err != nil {

@@ -96,14 +96,22 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 	if raw == "" || namespace == "" {
 		return raw
 	}
-	return deriveStableUUIDv4(fmt.Sprintf(
+	seed := fmt.Sprintf(
 		"sub2api:codex-account-identity:%s:user:%d:account:%s:kind:%s:value:%s",
 		codexAccountIdentityNamespaceVersion,
 		apiKeyID,
 		namespace,
 		kind,
 		raw,
-	))
+	)
+	if kind == "installation" {
+		return deriveStableUUIDv4(seed)
+	}
+	return deriveStableUUIDv7(seed)
+}
+
+func scopeOpenAICodexSessionValue(account *Account, apiKeyID int64, raw string) string {
+	return scopeCodexAccountIdentityValue(account, apiKeyID, "session", raw)
 }
 
 var codexAccountIdentityFields = []struct {
@@ -116,6 +124,7 @@ var codexAccountIdentityFields = []struct {
 	{name: "session-id", kind: "session"},
 	{name: "thread_id", kind: "thread"},
 	{name: "thread-id", kind: "thread"},
+	{name: "x-codex-parent-thread-id", kind: "parent-thread"},
 	{name: "turn_id", kind: "turn"},
 	{name: "turn-id", kind: "turn"},
 	{name: "window_id", kind: "window"},
@@ -254,9 +263,9 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 		return
 	}
 	for _, field := range codexAccountIdentityFields {
-		// Underscore session/conversation headers are rebuilt separately from the
-		// prompt cache key by each request builder.
-		if field.name == "session_id" {
+		// Session aliases are rebuilt together by each request builder so both
+		// underscore and hyphen forms point at the same scoped UUIDv7 value.
+		if field.name == "session_id" || field.name == "session-id" {
 			continue
 		}
 		raw := strings.TrimSpace(headers.Get(field.name))

@@ -103,6 +103,9 @@ func (s *OpenAIGatewayService) openAIWSHTTPBridgeThresholdBytes() int64 {
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloadBytes int, previousResponseID string) bool {
+	if codexStateTakeoverEnabled(account) {
+		return true
+	}
 	if account != nil && account.Platform == PlatformGrok {
 		return true
 	}
@@ -117,6 +120,9 @@ func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloa
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSPassthroughFirstMessage(account *Account, payload []byte) bool {
+	if codexStateTakeoverEnabled(account) {
+		return true
+	}
 	if account != nil && account.Platform == PlatformGrok {
 		return true
 	}

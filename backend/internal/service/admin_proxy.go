@@ -71,6 +71,9 @@ func (s *adminServiceImpl) CreateProxy(ctx context.Context, input *CreateProxyIn
 	if input.ExpiryWarnDays < 0 {
 		return nil, infraerrors.BadRequest("PROXY_WARN_DAYS_INVALID", "expiry_warn_days must be >= 0")
 	}
+	if err := s.validateProxyChain(ctx, 0, input.ChainProxyID); err != nil {
+		return nil, err
+	}
 
 	proxy := &Proxy{
 		Name:           input.Name,
@@ -83,6 +86,7 @@ func (s *adminServiceImpl) CreateProxy(ctx context.Context, input *CreateProxyIn
 		ExpiresAt:      input.ExpiresAt,
 		FallbackMode:   mode,
 		BackupProxyID:  input.BackupProxyID,
+		ChainProxyID:   input.ChainProxyID,
 		ExpiryWarnDays: input.ExpiryWarnDays,
 	}
 	if err := s.proxyRepo.Create(ctx, proxy); err != nil {
@@ -101,6 +105,9 @@ func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *Upd
 	if input.BackupProxyID != nil && *input.BackupProxyID == id {
 		return nil, infraerrors.BadRequest("PROXY_BACKUP_SELF", "backup proxy cannot be itself")
 	}
+	if input.ChainProxyID != nil && *input.ChainProxyID == id {
+		return nil, infraerrors.BadRequest("PROXY_CHAIN_SELF", "chain proxy cannot be itself")
+	}
 	proxy, err := s.proxyRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -117,6 +124,13 @@ func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *Upd
 	}
 	if mode == FallbackModeProxy && backupID == nil {
 		return nil, infraerrors.BadRequest("PROXY_BACKUP_REQUIRED", "backup proxy required when fallback_mode=proxy")
+	}
+	chainID := proxy.ChainProxyID
+	if input.ChainProxyID != nil || input.ClearChainID {
+		chainID = input.ChainProxyID
+	}
+	if err := s.validateProxyChain(ctx, id, chainID); err != nil {
+		return nil, err
 	}
 	if input.ExpiryWarnDays != nil && *input.ExpiryWarnDays < 0 {
 		return nil, infraerrors.BadRequest("PROXY_WARN_DAYS_INVALID", "expiry_warn_days must be >= 0")
@@ -148,6 +162,8 @@ func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *Upd
 	}
 	proxy.FallbackMode = mode
 	proxy.BackupProxyID = backupID
+	proxy.ChainProxyID = chainID
+	proxy.ChainProxyChanged = input.ChainProxyID != nil || input.ClearChainID
 	if input.ExpiryWarnDays != nil {
 		proxy.ExpiryWarnDays = *input.ExpiryWarnDays
 	}
@@ -164,6 +180,13 @@ func (s *adminServiceImpl) DeleteProxy(ctx context.Context, id int64) error {
 		return err
 	}
 	if count > 0 {
+		return ErrProxyInUse
+	}
+	dependent, err := s.proxyChainDependentCount(ctx, id)
+	if err != nil {
+		return err
+	}
+	if dependent > 0 {
 		return ErrProxyInUse
 	}
 	return s.proxyRepo.Delete(ctx, id)
@@ -191,6 +214,15 @@ func (s *adminServiceImpl) BatchDeleteProxies(ctx context.Context, ids []int64) 
 			})
 			continue
 		}
+		dependent, err := s.proxyChainDependentCount(ctx, id)
+		if err != nil {
+			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{ID: id, Reason: err.Error()})
+			continue
+		}
+		if dependent > 0 {
+			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{ID: id, Reason: ErrProxyInUse.Error()})
+			continue
+		}
 		if err := s.proxyRepo.Delete(ctx, id); err != nil {
 			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{
 				ID:     id,
@@ -202,6 +234,46 @@ func (s *adminServiceImpl) BatchDeleteProxies(ctx context.Context, ids []int64) 
 	}
 
 	return result, nil
+}
+
+func (s *adminServiceImpl) validateProxyChain(ctx context.Context, proxyID int64, chainProxyID *int64) error {
+	if chainProxyID == nil || *chainProxyID <= 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{})
+	currentID := *chainProxyID
+	for depth := 0; depth < 32; depth++ {
+		if proxyID > 0 && currentID == proxyID {
+			return infraerrors.BadRequest("PROXY_CHAIN_CYCLE", "proxy chain cannot contain a cycle")
+		}
+		if _, ok := seen[currentID]; ok {
+			return infraerrors.BadRequest("PROXY_CHAIN_CYCLE", "proxy chain cannot contain a cycle")
+		}
+		seen[currentID] = struct{}{}
+		proxy, err := s.proxyRepo.GetByID(ctx, currentID)
+		if err != nil {
+			return infraerrors.BadRequest("PROXY_CHAIN_NOT_FOUND", "chain proxy not found")
+		}
+		if proxy.ChainProxyID == nil || *proxy.ChainProxyID <= 0 {
+			return nil
+		}
+		currentID = *proxy.ChainProxyID
+	}
+	return infraerrors.BadRequest("PROXY_CHAIN_TOO_DEEP", "proxy chain is too deep")
+}
+
+func (s *adminServiceImpl) proxyChainDependentCount(ctx context.Context, proxyID int64) (int, error) {
+	proxies, err := s.proxyRepo.ListAllForFallback(ctx)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for i := range proxies {
+		if proxies[i].ChainProxyID != nil && *proxies[i].ChainProxyID == proxyID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *adminServiceImpl) GetProxyAccounts(ctx context.Context, proxyID int64) ([]ProxyAccountSummary, error) {

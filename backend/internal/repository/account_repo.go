@@ -61,6 +61,7 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 	"upstream_billing_probe",
 	"upstream_billing_rate_sync",
 	"ollama_cloud_usage",
+	"codex_state_",
 }
 
 var schedulerNeutralExtraKeys = map[string]struct{}{
@@ -344,6 +345,15 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 			out.AccountGroups = ags
 		}
 		outByID[entAcc.ID] = out
+	}
+	proxiesToHydrate := make([]*service.Proxy, 0, len(outByID))
+	for _, account := range outByID {
+		if account.Proxy != nil {
+			proxiesToHydrate = append(proxiesToHydrate, account.Proxy)
+		}
+	}
+	if err := hydrateProxyChains(ctx, r.client, proxiesToHydrate); err != nil {
+		return nil, err
 	}
 
 	// Preserve input order (first occurrence), and ignore missing IDs.
@@ -646,7 +656,11 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'upstream_billing_probe',
 			extra -> 'ollama_cloud_usage_session',
 			extra -> 'ollama_cloud_usage_auto_refresh',
-			extra -> 'ollama_cloud_usage_snapshot'
+			extra -> 'ollama_cloud_usage_snapshot',
+			extra -> 'codex_state_models',
+			extra -> 'codex_state_degraded',
+			extra -> 'codex_state_last_292_at',
+			extra -> 'codex_state_last_312_at'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -672,6 +686,10 @@ func lockAndMergeAccountProbeExtra(
 		currentOllamaSession         []byte
 		currentOllamaAutoRefresh     []byte
 		currentOllamaSnapshot        []byte
+		currentCodexStateModels      []byte
+		currentCodexStateDegraded    []byte
+		currentCodexStateLast292     []byte
+		currentCodexStateLast312     []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -683,6 +701,10 @@ func lockAndMergeAccountProbeExtra(
 		&currentOllamaSession,
 		&currentOllamaAutoRefresh,
 		&currentOllamaSnapshot,
+		&currentCodexStateModels,
+		&currentCodexStateDegraded,
+		&currentCodexStateLast292,
+		&currentCodexStateLast312,
 	); err != nil {
 		return nil, err
 	}
@@ -698,6 +720,10 @@ func lockAndMergeAccountProbeExtra(
 		service.OllamaCloudUsageSessionExtraKey,
 		service.OllamaCloudUsageAutoRefreshExtraKey,
 		service.OllamaCloudUsageSnapshotExtraKey,
+		service.CodexStateModelsExtraKey,
+		service.CodexStateDegradedExtraKey,
+		service.CodexStateLast292ExtraKey,
+		service.CodexStateLast312ExtraKey,
 	} {
 		delete(extra, key)
 	}
@@ -773,6 +799,18 @@ func lockAndMergeAccountProbeExtra(
 			} else if ok {
 				extra[service.OllamaCloudUsageSnapshotExtraKey] = snapshot
 			}
+		}
+	}
+	for key, raw := range map[string][]byte{
+		service.CodexStateModelsExtraKey:   currentCodexStateModels,
+		service.CodexStateDegradedExtraKey: currentCodexStateDegraded,
+		service.CodexStateLast292ExtraKey:  currentCodexStateLast292,
+		service.CodexStateLast312ExtraKey:  currentCodexStateLast312,
+	} {
+		if value, ok, err := decodeAccountExtraJSON(raw); err != nil {
+			return nil, err
+		} else if ok {
+			extra[key] = value
 		}
 	}
 	return extra, nil
@@ -3301,6 +3339,13 @@ func (r *accountRepository) loadProxies(ctx context.Context, proxyIDs []int64) (
 		for _, p := range proxies {
 			proxyMap[p.ID] = proxyEntityToService(p)
 		}
+	}
+	proxiesToHydrate := make([]*service.Proxy, 0, len(proxyMap))
+	for _, proxy := range proxyMap {
+		proxiesToHydrate = append(proxiesToHydrate, proxy)
+	}
+	if err := hydrateProxyChains(ctx, r.client, proxiesToHydrate); err != nil {
+		return nil, err
 	}
 	return proxyMap, nil
 }

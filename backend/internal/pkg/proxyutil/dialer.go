@@ -53,6 +53,10 @@ var socks5ForwardDialer = &net.Dialer{
 // 返回：
 //   - error: 代理配置错误（协议不支持或 dialer 创建失败）
 func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error {
+	return ConfigureTransportProxyWithForward(transport, proxyURL, nil)
+}
+
+func ConfigureTransportProxyWithForward(transport *http.Transport, proxyURL *url.URL, forward *ForwardDialer) error {
 	if proxyURL == nil {
 		return nil
 	}
@@ -61,10 +65,17 @@ func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error
 	switch scheme {
 	case "http", "https":
 		transport.Proxy = http.ProxyURL(proxyURL)
+		if forward != nil {
+			transport.DialContext = forward.DialContext
+		}
 		return nil
 
 	case "socks5", "socks5h":
-		dialer, err := proxy.FromURL(proxyURL, socks5ForwardDialer)
+		forwardDialer := proxy.Dialer(socks5ForwardDialer)
+		if forward != nil {
+			forwardDialer = forward
+		}
+		dialer, err := proxy.FromURL(proxyURL, forwardDialer)
 		if err != nil {
 			return fmt.Errorf("create socks5 dialer: %w", err)
 		}

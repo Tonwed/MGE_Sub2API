@@ -311,6 +311,10 @@ func TestBuildSchedulerMetadataAccount_KeepsOpenAIWSFlags(t *testing.T) {
 			"openai_responses_supported":                   false,
 			"codex_fingerprint_mode":                       "session",
 			"codex_fingerprint_seed":                       "11111111-1111-4111-8111-111111111111",
+			service.CodexStateAutoMintExtraKey:             true,
+			service.CodexStateProxyIDsExtraKey:             []any{1, 2},
+			service.CodexStateConcurrencyExtraKey:          3,
+			service.CodexStateRefreshBeforeExtraKey:        15,
 			"mixed_scheduling":                             true,
 			"unused_large_field":                           "drop-me",
 		},
@@ -325,6 +329,10 @@ func TestBuildSchedulerMetadataAccount_KeepsOpenAIWSFlags(t *testing.T) {
 	require.Equal(t, false, got.Extra["openai_responses_supported"])
 	require.Equal(t, "session", got.Extra["codex_fingerprint_mode"])
 	require.Equal(t, "11111111-1111-4111-8111-111111111111", got.Extra["codex_fingerprint_seed"])
+	require.Equal(t, true, got.Extra[service.CodexStateAutoMintExtraKey])
+	require.Equal(t, []any{1, 2}, got.Extra[service.CodexStateProxyIDsExtraKey])
+	require.Equal(t, 3, got.Extra[service.CodexStateConcurrencyExtraKey])
+	require.Equal(t, 15, got.Extra[service.CodexStateRefreshBeforeExtraKey])
 	require.Equal(t, true, got.Extra["mixed_scheduling"])
 	require.Nil(t, got.Extra["unused_large_field"])
 }

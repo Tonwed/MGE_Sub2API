@@ -870,7 +870,6 @@ func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.
 		{name: "session hyphen", header: "session-id", value: "session-hyphen-b"},
 		{name: "session underscore", header: "session_id", value: "session-underscore-b"},
 		{name: "thread", header: "thread-id", value: "thread-b"},
-		{name: "client request", header: "x-client-request-id", value: "client-request-b"},
 		{name: "window", header: "x-codex-window-id", value: "window-b"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -907,6 +906,40 @@ func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.
 			require.Equal(t, 2, dialer.DialCount())
 		})
 	}
+}
+
+func TestOpenAIWSConnPool_ClientRequestIDDoesNotForceNewConnection(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := activeCodexFingerprintPoolAccountForTest(135)
+
+	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+		Headers: stableOpenAIWSIdentityHeadersForTest(),
+	})
+	require.NoError(t, err)
+	firstConnID := first.ConnID()
+	first.Release()
+
+	nextHeaders := stableOpenAIWSIdentityHeadersForTest()
+	nextHeaders.Set("x-client-request-id", "client-request-b")
+	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+		Headers: nextHeaders,
+	})
+	require.NoError(t, err)
+	require.True(t, second.Reused())
+	require.Equal(t, firstConnID, second.ConnID())
+	second.Release()
+	require.Equal(t, 1, dialer.DialCount())
 }
 
 func TestOpenAIWSConnPool_AcquireRoutingHintRemainsSoftAffinity(t *testing.T) {
