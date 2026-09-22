@@ -39,6 +39,21 @@ const (
 
 var ErrCodexStateNotFound = errors.New("codex turn state not found")
 
+// codexStateAccountExtraMu serializes the reads and writes of Account.Extra
+// performed by this manager. Account objects are shared between request
+// handlers and background refresh timers, so mutating the map in place races
+// with those reads and can abort the whole process.
+var codexStateAccountExtraMu sync.Mutex
+
+// codexStateAccountGate reports whether auto-minting is enabled and how early
+// to refresh, taking the Extra snapshot under the shared lock.
+func codexStateAccountGate(account *Account) (bool, time.Duration) {
+	codexStateAccountExtraMu.Lock()
+	defer codexStateAccountExtraMu.Unlock()
+	enabled, _ := account.Extra[CodexStateAutoMintExtraKey].(bool)
+	return enabled, codexStateRefreshBefore(account)
+}
+
 // Managed states are selected per turn, not pinned to a pooled WS handshake.
 func codexStateTakeoverEnabled(account *Account) bool {
 	if account == nil || !account.UsesOpenAICodexProtocol() {
@@ -804,12 +819,16 @@ func (m *CodexStateManager) updateStatus(ctx context.Context, account *Account, 
 	if err := m.accountStore.UpdateExtra(ctx, account.ID, updates); err != nil {
 		return err
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
+	codexStateAccountExtraMu.Lock()
+	next := make(map[string]any, len(account.Extra)+len(updates))
+	for key, value := range account.Extra {
+		next[key] = value
 	}
 	for key, value := range updates {
-		account.Extra[key] = value
+		next[key] = value
 	}
+	account.Extra = next
+	codexStateAccountExtraMu.Unlock()
 	return nil
 }
 
@@ -908,9 +927,9 @@ func (m *CodexStateManager) scheduleRefresh(account *Account, model string, entr
 				latest = loaded
 			}
 		}
-		if m.Enabled(latest) {
+		if enabled, refreshBefore := codexStateAccountGate(latest); enabled {
 			current, err := m.Current(ctx, latest, model)
-			if err == nil && current != nil && current.ExpiresAt.Sub(m.now()) <= codexStateRefreshBefore(latest) {
+			if err == nil && current != nil && current.ExpiresAt.Sub(m.now()) <= refreshBefore {
 				m.TriggerMint(latest, model)
 			}
 		}
