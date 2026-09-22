@@ -23,10 +23,12 @@ const (
 	CodexStateLast312ExtraKey       = "codex_state_last_312_at"
 	CodexStateGoodLength            = 292
 	CodexStateDegradedLength        = 312
-	CodexStateLifetime              = time.Hour
-	CodexStateRefreshBefore         = 10 * time.Minute
+	CodexStateLifetime              = 4 * time.Minute
+	CodexStateRefreshBefore         = 2 * time.Minute
 	CodexStateMinRefreshDelay       = 30 * time.Second
 	codexStateSnapshotCacheKey      = "sub2api:codex-state:v1:"
+	codexStateCookieCacheKey        = "sub2api:codex-state:cookies:v1:"
+	codexStateCookieCacheTTL        = 10 * time.Minute
 	codexStateDefaultRetryCount     = 8
 	codexStateRetryDelay            = 3 * time.Second
 	CodexStateConcurrencyMin        = 1
@@ -56,13 +58,20 @@ type CodexStateModelStatus struct {
 
 // CodexTurnStateEntry is the server-side routing token and its lifetime.
 type CodexTurnStateEntry struct {
-	Value      string    `json:"value"`
-	Model      string    `json:"model"`
-	AccountID  int64     `json:"account_id"`
-	ProxyID    int64     `json:"proxy_id,omitempty"`
-	AcquiredAt time.Time `json:"acquired_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	VerifiedAt time.Time `json:"verified_at"`
+	Value        string    `json:"value"`
+	Model        string    `json:"model"`
+	AccountID    int64     `json:"account_id"`
+	ProxyID      int64     `json:"proxy_id,omitempty"`
+	AcquiredAt   time.Time `json:"acquired_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	VerifiedAt   time.Time `json:"verified_at"`
+	CookieHeader string    `json:"cookie_header,omitempty"`
+}
+
+type codexStateCookieSnapshot struct {
+	Cookies   []string  `json:"cookies"`
+	UpdatedAt time.Time `json:"updated_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type CodexTurnStateSnapshot struct {
@@ -242,9 +251,131 @@ func (m *CodexStateManager) InjectHeader(ctx context.Context, account *Account, 
 		return
 	}
 	headers.Set(openAICodexTurnStateHeader, entry.Value)
+	if cookieHeader := strings.TrimSpace(entry.CookieHeader); cookieHeader != "" {
+		headers.Set("cookie", cookieHeader)
+	} else {
+		m.injectCookies(ctx, account.ID, headers)
+	}
 	if entry.ExpiresAt.Sub(m.now()) <= codexStateRefreshBefore(account) {
 		m.TriggerMint(account, model)
 	}
+}
+
+func codexStateCookieNameAllowed(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "__cf_bm", "__cflb", "__oailb":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexStateCookiesFromHeaders(headers http.Header) []string {
+	if headers == nil {
+		return nil
+	}
+	response := &http.Response{Header: headers}
+	out := make([]string, 0, 3)
+	for _, cookie := range response.Cookies() {
+		if cookie == nil || !codexStateCookieNameAllowed(cookie.Name) || strings.TrimSpace(cookie.Value) == "" {
+			continue
+		}
+		out = append(out, cookie.Name+"="+cookie.Value)
+	}
+	return normalizeCodexStateCookies(out)
+}
+
+func normalizeCodexStateCookies(cookies []string) []string {
+	values := make(map[string]string, len(cookies))
+	for _, raw := range cookies {
+		name, value, ok := strings.Cut(strings.TrimSpace(raw), "=")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if !ok || !codexStateCookieNameAllowed(name) || value == "" {
+			continue
+		}
+		values[name] = value
+	}
+	out := make([]string, 0, len(values))
+	for _, name := range []string{"__cf_bm", "__cflb", "__oailb"} {
+		if value := values[name]; value != "" {
+			out = append(out, name+"="+value)
+		}
+	}
+	return out
+}
+
+func mergeCodexStateCookies(existing, incoming []string) []string {
+	return normalizeCodexStateCookies(append(append([]string(nil), existing...), incoming...))
+}
+
+func (m *CodexStateManager) loadCookieSnapshot(ctx context.Context, accountID int64) (*codexStateCookieSnapshot, error) {
+	if m == nil || accountID <= 0 {
+		return nil, ErrCodexStateNotFound
+	}
+	payload, err := m.cacheGet(ctx, fmt.Sprintf("%s%d", codexStateCookieCacheKey, accountID))
+	if err != nil {
+		return nil, err
+	}
+	var snapshot codexStateCookieSnapshot
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return nil, err
+	}
+	snapshot.Cookies = normalizeCodexStateCookies(snapshot.Cookies)
+	if len(snapshot.Cookies) == 0 || (!snapshot.ExpiresAt.IsZero() && !m.now().Before(snapshot.ExpiresAt)) {
+		return nil, ErrCodexStateNotFound
+	}
+	return &snapshot, nil
+}
+
+func (m *CodexStateManager) storeCookies(ctx context.Context, accountID int64, incoming []string) {
+	if m == nil || accountID <= 0 {
+		return
+	}
+	incoming = normalizeCodexStateCookies(incoming)
+	if len(incoming) == 0 {
+		return
+	}
+	existing, _ := m.loadCookieSnapshot(ctx, accountID)
+	var current []string
+	if existing != nil {
+		current = existing.Cookies
+	}
+	now := m.now()
+	snapshot := &codexStateCookieSnapshot{
+		Cookies:   mergeCodexStateCookies(current, incoming),
+		UpdatedAt: now,
+		ExpiresAt: now.Add(codexStateCookieCacheTTL),
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	_ = m.cacheSet(ctx, fmt.Sprintf("%s%d", codexStateCookieCacheKey, accountID), payload, codexStateCookieCacheTTL)
+}
+
+func (m *CodexStateManager) cookieHeader(ctx context.Context, accountID int64) string {
+	snapshot, err := m.loadCookieSnapshot(ctx, accountID)
+	if err != nil || snapshot == nil || len(snapshot.Cookies) == 0 {
+		return ""
+	}
+	return strings.Join(snapshot.Cookies, "; ")
+}
+
+func (m *CodexStateManager) injectCookies(ctx context.Context, accountID int64, headers http.Header) {
+	if headers == nil {
+		return
+	}
+	if cookieHeader := m.cookieHeader(ctx, accountID); cookieHeader != "" {
+		headers.Set("cookie", cookieHeader)
+	}
+}
+
+func (m *CodexStateManager) ObserveCookies(ctx context.Context, account *Account, headers http.Header) {
+	if m == nil || account == nil {
+		return
+	}
+	m.storeCookies(ctx, account.ID, codexStateCookiesFromHeaders(headers))
 }
 
 func (m *CodexStateManager) Observe(ctx context.Context, account *Account, model, state, errorCode string) {
@@ -263,12 +394,13 @@ func (m *CodexStateManager) Observe(ctx context.Context, account *Account, model
 	case CodexStateGoodLength:
 		status := m.ModelStatus(account, model)
 		entry := &CodexTurnStateEntry{
-			Value:      strings.TrimSpace(state),
-			Model:      model,
-			AccountID:  account.ID,
-			AcquiredAt: now,
-			ExpiresAt:  now.Add(CodexStateLifetime),
-			VerifiedAt: now,
+			Value:        strings.TrimSpace(state),
+			Model:        model,
+			AccountID:    account.ID,
+			AcquiredAt:   now,
+			ExpiresAt:    now.Add(CodexStateLifetime),
+			VerifiedAt:   now,
+			CookieHeader: m.cookieHeader(ctx, account.ID),
 		}
 		if err := m.storeSnapshot(ctx, account, &CodexTurnStateSnapshot{Current: entry}); err == nil {
 			if status.Degraded || status.Last292At == nil ||
@@ -299,6 +431,28 @@ func (m *CodexStateManager) Observe(ctx context.Context, account *Account, model
 			m.maybeTriggerMint(ctx, account, model)
 		}
 	}
+}
+
+// MarkDegraded records that upstream rerouted a managed model away from its
+// canonical name (for example Astra to Luna). The current turn state is no
+// longer trustworthy, so this also requests a fresh one.
+func (m *CodexStateManager) MarkDegraded(ctx context.Context, account *Account, model string) {
+	if m == nil || account == nil || !codexStateModelManaged(account, model) {
+		return
+	}
+	model = normalizeCodexStateModel(model)
+	if model == "" {
+		return
+	}
+	now := m.now()
+	status := m.ModelStatus(account, model)
+	if !status.Degraded || status.Last312At == nil || now.Sub(*status.Last312At) >= time.Minute {
+		_ = m.updateStatus(ctx, account, model, func(status *CodexStateModelStatus) {
+			status.Degraded = true
+			status.Last312At = &now
+		})
+	}
+	m.maybeTriggerMint(ctx, account, model)
 }
 
 func (m *CodexStateManager) Current(ctx context.Context, account *Account, model string) (*CodexTurnStateEntry, error) {
@@ -842,6 +996,9 @@ func codexStateRefreshBefore(account *Account) time.Duration {
 	}
 	if minutes > CodexStateRefreshBeforeMax {
 		minutes = CodexStateRefreshBeforeMax
+	}
+	if maxMinutes := int(CodexStateRefreshBefore / time.Minute); maxMinutes > 0 && minutes > maxMinutes {
+		minutes = maxMinutes
 	}
 	return time.Duration(minutes) * time.Minute
 }

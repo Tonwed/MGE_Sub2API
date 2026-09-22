@@ -50,6 +50,7 @@ func (s *OpenAIGatewayService) observeCodexTurnState(
 	if s == nil || s.codexStateManager == nil || account == nil || headers == nil {
 		return
 	}
+	s.codexStateManager.ObserveCookies(ctx, account, headers)
 	slog.Debug("codex_state.observe_hook", "account_id", account.ID, "model", model)
 	state := strings.TrimSpace(headers.Get(openAICodexTurnStateHeader))
 	errorCode := ""
@@ -63,4 +64,14 @@ func (s *OpenAIGatewayService) observeCodexTurnState(
 		"state_len", len(state),
 	)
 	s.codexStateManager.Observe(ctx, account, model, state, errorCode)
+}
+
+// markCodexStateDegraded flags the account/model as degraded and asks the
+// manager to mint a fresh turn state. It is used when upstream reroutes the
+// response model away from the canonical one before any client output.
+func (s *OpenAIGatewayService) markCodexStateDegraded(ctx context.Context, account *Account, model string) {
+	if s == nil || s.codexStateManager == nil || account == nil {
+		return
+	}
+	s.codexStateManager.MarkDegraded(ctx, account, model)
 }

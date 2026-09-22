@@ -281,6 +281,11 @@ func upstreamModelMismatch(sentModel, responseModel string) *bool {
 	return &mismatch
 }
 
+func isOpenAIAstraLunaReroute(requestedModel, responseModel string) bool {
+	return normalizeCodexStateModel(requestedModel) == CodexStateDefaultModel &&
+		strings.EqualFold(strings.TrimSpace(responseModel), "gpt-5.6-luna")
+}
+
 func upstreamModelsMatchForAudit(sentModel, responseModel string) bool {
 	if strings.EqualFold(sentModel, responseModel) {
 		return true

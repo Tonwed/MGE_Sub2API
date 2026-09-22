@@ -109,7 +109,7 @@ func (u *codexStateConcurrencyHTTPUpstream) Do(
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     header,
-		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n")),
 		Request:    request,
 	}, nil
 }
@@ -143,7 +143,7 @@ func (u *codexStateFlakyHTTPUpstream) Do(
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     header,
-		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n")),
 		Request:    request,
 	}, nil
 }
@@ -171,7 +171,7 @@ func (u *codexStateTestHTTPUpstream) Do(
 	u.lastBody, _ = io.ReadAll(request.Body)
 	u.mu.Unlock()
 	header := make(http.Header)
-	body := "data: {\"type\":\"response.completed\"}\n\n"
+	body := "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n"
 	switch requestNumber % 3 {
 	case 1:
 		header.Set(openAICodexTurnStateHeader, strings.Repeat("a", CodexStateDegradedLength))
@@ -242,6 +242,26 @@ func TestCodexStateManagerMintRetryObserveAndInject(t *testing.T) {
 	require.True(t, manager.ModelStatus(account, "gpt-6-astra").Degraded)
 	manager.Observe(context.Background(), account, "gpt-6-astra", entry.Value, "")
 	require.False(t, manager.ModelStatus(account, "gpt-6-astra").Degraded)
+}
+
+func TestCodexStateManagerMarkDegradedFlagsModel(t *testing.T) {
+	account := &Account{
+		ID: 21, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Credentials: map[string]any{"access_token": "a", "chatgpt_account_id": "a"},
+		Extra:       map[string]any{CodexStateAutoMintExtraKey: true},
+	}
+	upstream := &codexStateTestHTTPUpstream{}
+	manager := NewCodexStateManager(&codexStateTestAccountStore{account: account}, nil, upstream, nil)
+
+	manager.MarkDegraded(context.Background(), account, "gpt-6-astra")
+
+	status := manager.ModelStatus(account, "gpt-6-astra")
+	require.True(t, status.Degraded)
+	require.NotNil(t, status.Last312At)
+
+	// Unmanaged models are ignored.
+	manager.MarkDegraded(context.Background(), account, "gpt-5-codex")
+	require.False(t, manager.ModelStatus(account, "gpt-5-codex").Degraded)
 }
 
 func TestCodexStateManagerKeepsAccountsIsolated(t *testing.T) {
@@ -324,10 +344,10 @@ func TestCodexStateRefreshBeforeClampsConfiguredValue(t *testing.T) {
 	require.Equal(t, time.Minute, codexStateRefreshBefore(&Account{Extra: map[string]any{
 		CodexStateRefreshBeforeExtraKey: 0,
 	}}))
-	require.Equal(t, 15*time.Minute, codexStateRefreshBefore(&Account{Extra: map[string]any{
+	require.Equal(t, 2*time.Minute, codexStateRefreshBefore(&Account{Extra: map[string]any{
 		CodexStateRefreshBeforeExtraKey: 15,
 	}}))
-	require.Equal(t, CodexStateRefreshBeforeMax*time.Minute, codexStateRefreshBefore(&Account{Extra: map[string]any{
+	require.Equal(t, 2*time.Minute, codexStateRefreshBefore(&Account{Extra: map[string]any{
 		CodexStateRefreshBeforeExtraKey: 99,
 	}}))
 }
@@ -448,6 +468,39 @@ func TestCodexStateModelManagedLimitsAutomaticTakeover(t *testing.T) {
 	require.True(t, codexStateModelManaged(&Account{}, CodexStateDefaultModel))
 }
 
+func TestCodexStateCookiePoolIsAccountScopedAndMerged(t *testing.T) {
+	manager := NewCodexStateManager(nil, nil, nil, nil)
+	account := &Account{ID: 77}
+	headers := make(http.Header)
+	headers.Add("Set-Cookie", "__cf_bm=cf-old; Path=/; Secure")
+	headers.Add("Set-Cookie", "__cflb=flb-old; Path=/; Secure")
+	headers.Add("Set-Cookie", "ignored=value; Path=/")
+	manager.ObserveCookies(context.Background(), account, headers)
+
+	headers = make(http.Header)
+	headers.Add("Set-Cookie", "__cf_bm=cf-new; Path=/; Secure")
+	headers.Add("Set-Cookie", "__oailb=oai-new; Path=/; Secure")
+	manager.ObserveCookies(context.Background(), account, headers)
+
+	requestHeaders := make(http.Header)
+	manager.injectCookies(context.Background(), account.ID, requestHeaders)
+	cookieHeader := requestHeaders.Get("Cookie")
+	require.Contains(t, cookieHeader, "__cf_bm=cf-new")
+	require.Contains(t, cookieHeader, "__cflb=flb-old")
+	require.Contains(t, cookieHeader, "__oailb=oai-new")
+	require.NotContains(t, cookieHeader, "ignored=")
+
+	otherAccountHeaders := make(http.Header)
+	manager.injectCookies(context.Background(), 78, otherAccountHeaders)
+	require.Empty(t, otherAccountHeaders.Get("Cookie"))
+}
+
+func TestExtractCodexStateCompletedModel(t *testing.T) {
+	body := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n")
+	require.Equal(t, "gpt-6-astra", extractCodexStateCompletedModel(body))
+	require.Empty(t, extractCodexStateCompletedModel([]byte("data: {\"type\":\"response.created\"}\n\n")))
+}
+
 func TestCodexStateProbeUsesCompleteCodexWireIdentity(t *testing.T) {
 	account := &Account{
 		ID:       91,
@@ -461,7 +514,7 @@ func TestCodexStateProbeUsesCompleteCodexWireIdentity(t *testing.T) {
 	upstream := &codexStateTestHTTPUpstream{}
 	manager := NewCodexStateManager(nil, nil, upstream, nil)
 
-	_, err := manager.probeOnce(context.Background(), account, "gpt-6-astra", "", "")
+	_, err := manager.probeOnce(context.Background(), account, "gpt-6-astra", "", "", "")
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastHeaders)
 

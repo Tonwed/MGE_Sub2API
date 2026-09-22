@@ -130,6 +130,13 @@ func TestUpstreamModelMismatchDoesNotCollapseDifferentModels(t *testing.T) {
 	}
 }
 
+func TestIsOpenAIAstraLunaReroute(t *testing.T) {
+	require.True(t, isOpenAIAstraLunaReroute("gpt-6-astra", "gpt-5.6-luna"))
+	require.True(t, isOpenAIAstraLunaReroute("GPT-6-ASTRA", "GPT-5.6-LUNA"))
+	require.False(t, isOpenAIAstraLunaReroute("gpt-5.6-sol", "gpt-5.6-luna"))
+	require.False(t, isOpenAIAstraLunaReroute("gpt-6-astra", "gpt-6-astra"))
+}
+
 func TestObserveOpenAISSEBodyIgnoresMalformedPayload(t *testing.T) {
 	observer := &upstreamResponseModelObserver{}
 	observeOpenAISSEBody(observer, "data: not-json\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.4\"}}\n\n")

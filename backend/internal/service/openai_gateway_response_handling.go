@@ -509,6 +509,26 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if responseID == "" {
 				responseID = extractOpenAIResponseIDFromJSONBytes(dataBytes)
 			}
+			if account != nil && account.UsesOpenAICodexProtocol() &&
+				!openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				responseModel := strings.TrimSpace(firstValidTrimmedGJSONString(dataBytes, "response.model", "model"))
+				if isOpenAIAstraLunaReroute(mappedModel, responseModel) {
+					message := fmt.Sprintf("OpenAI rerouted %s to %s before output; switching account", mappedModel, responseModel)
+					logger.LegacyPrintf("service.openai_gateway", "%s account=%d request_id=%s", message, account.ID, upstreamRequestID)
+					s.markCodexStateDegraded(ctx, account, mappedModel)
+					streamEarlyErr = s.newOpenAIStreamFailoverErrorWithModel(
+						c,
+						account,
+						false,
+						upstreamRequestID,
+						dataBytes,
+						message,
+						mappedModel,
+						resp.Header,
+					)
+					return
+				}
+			}
 			forceFlushFailedEvent := false
 			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
 				(eventType == "error" || eventType == "response.failed") &&
@@ -1592,6 +1612,21 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+	}
+	if account != nil && account.UsesOpenAICodexProtocol() && isOpenAIAstraLunaReroute(mappedModel, observer.Model()) {
+		message := fmt.Sprintf("OpenAI rerouted %s to %s before output; switching account", mappedModel, observer.Model())
+		logger.LegacyPrintf("service.openai_gateway", "%s account=%d request_id=%s", message, account.ID, resp.Header.Get("x-request-id"))
+		s.markCodexStateDegraded(c.Request.Context(), account, mappedModel)
+		return nil, s.newOpenAIStreamFailoverErrorWithModel(
+			c,
+			account,
+			false,
+			resp.Header.Get("x-request-id"),
+			body,
+			message,
+			mappedModel,
+			resp.Header,
+		)
 	}
 
 	// Detect SSE responses for ALL account types via Content-Type header.
